@@ -1,0 +1,7 @@
+examples
+output
+.vscode
+.github
+.cursor
+**/__pycache__
+test.ipynb
