@@ -140,7 +140,6 @@ def _invert_se3_4x4(T_wc: np.ndarray) -> np.ndarray:
 # -----------------------------------------------------------------------------
 # CLIP_Surgery 特征提取（patch 级，忽略 CLS）
 # -----------------------------------------------------------------------------
-
 class ClipSurgeryExtractor:
     """CLIP_Surgery 特征提取器。
 
@@ -331,20 +330,28 @@ class FeatureExtractorPatch:
             camera_intrinsic: (3, 3)
             camera_pose: (4, 4) 相机到世界
         """
-        if depth_image.ndim == 3 and depth_image.shape[-1] == 1: #? vggt 输出的深度图不是按 m 计算的
+        import time
+        t_start = time.time()
+
+        # 步骤1：CLIP特征提取
+        t1 = time.time()
+        if depth_image.ndim == 3 and depth_image.shape[-1] == 1:
             depth_image = depth_image[..., 0]
-
-        # 1) 提取 CLIP patch 特征 & patch 相机内参
         feat_dict = self.clip_extractor.extract_patch_features_from_rgb(rgb_image)
-        token_feat = feat_dict['features']  # (Ntok,C)
+        token_feat = feat_dict['features']
         Hp, Wp = feat_dict['grid_hw']
-        # 使用真实相机内参 + CLIP 预处理映射，得到 token 网格的“特征内参”
         pix_feats_intr = self._compute_token_intrinsics(camera_intrinsic, rgb_image.shape[0], rgb_image.shape[1])
+        t2 = time.time()
+        logger.info('process_frame: CLIP特征提取耗时 %.4f 秒', t2 - t1)
 
-        # 2) 深度反投影 -> 相机坐标点云（过滤掉深度值不符合要求的点）
+        # 步骤2：深度反投影
+        t3 = time.time()
         pc, mask = depth2pc(depth_image, intr_mat=camera_intrinsic, min_depth=0., max_depth=6)
+        t4 = time.time()
+        logger.info('process_frame: 深度反投影耗时 %.4f 秒', t4 - t3)
 
-        # 3) 置信度过滤 + 随机下采样（替换原采样逻辑）
+        # 步骤3：置信度过滤+下采样
+        t5 = time.time()
         conf_flat = depth_conf.reshape(-1).astype(np.float32)
         idx_all = np.arange(conf_flat.shape[0])
         idx_valid = idx_all[mask]
@@ -357,53 +364,44 @@ class FeatureExtractorPatch:
         idx_keep = idx_valid[keep]
         if self.depth_max_points > 0 and idx_keep.shape[0] > self.depth_max_points:
             idx_keep = np.random.choice(idx_keep, size=self.depth_max_points, replace=False)
-
-        # 应用于 pc
         pc = pc[:, idx_keep]
+        t6 = time.time()
+        logger.info('process_frame: 置信度过滤+下采样耗时 %.4f 秒', t6 - t5)
 
-        # 4) 坐标系对齐，以第一帧的坐标系为基准（世界坐标）
+        # 步骤4：坐标系对齐
+        t7 = time.time()
         if self.init_base_tf is None:
             self.init_base_tf = camera_pose.copy()
             self.inv_init_base_tf = np.linalg.inv(self.init_base_tf)
-
         base_pose = camera_pose
         tf = self.inv_init_base_tf @ base_pose
         pc_transform = tf @ self.base_transform @ self.base2cam_tf
-        pc_global = transform_pc(pc, pc_transform)  # 世界坐标
+        pc_global = transform_pc(pc, pc_transform)
+        t8 = time.time()
+        logger.info('process_frame: 坐标系对齐耗时 %.4f 秒', t8 - t7)
 
-        # 5) 融合
+        # 步骤5：特征融合
+        t9 = time.time()
         processed_points = 0
         C = int(token_feat.shape[1])
         feat_hw_c = token_feat.detach().cpu().to(torch.float32).reshape(Hp, Wp, C).numpy()
-        feat_hw_c /= (np.linalg.norm(feat_hw_c, axis=2, keepdims=True) + 1e-6) # 归一化
-
+        feat_hw_c /= (np.linalg.norm(feat_hw_c, axis=2, keepdims=True) + 1e-6)
         for p_global, p_local in zip(pc_global.T, pc.T):
-            # 变为体素网格中的索引
             row, col, height = base_pos2grid_id_3d(self.gs, self.cs, p_global[0], p_global[1], p_global[2])
             if self._out_of_range(row, col, height):
                 continue
-
-            # 投影到 RGB 获取颜色
-            px, py, pz = project_point(camera_intrinsic, p_local) # RGB 像素坐标
+            px, py, pz = project_point(camera_intrinsic, p_local)
             if px < 0 or py < 0 or px >= rgb_image.shape[1] or py >= rgb_image.shape[0]:
                 continue
             rgb_v = rgb_image[py, px, :]
-
-            # 投影到 patch 特征平面
             px_feat, py_feat, _ = project_point(pix_feats_intr, p_local)
-
-            # 高度/可视化
             if height > self.height_map[row, col]:
                 self.height_map[row, col] = height
                 self.cv_map[row, col, :] = rgb_v
-
             if self.max_id >= self.grid_feat.shape[0]:
                 self._reserve_map_space()
-
-            # 距离权重，重合点特征加权和
             radial_dist_sq = float(np.dot(p_local, p_local))
             alpha = float(np.exp(-radial_dist_sq / (2.0 * 0.6)))
-
             if not (px_feat < 0 or py_feat < 0 or px_feat >= Wp or py_feat >= Hp):
                 occupied_id = self.occupied_ids[row, col, height]
                 feat_np = feat_hw_c[py_feat, px_feat, :].reshape(-1)
@@ -420,8 +418,13 @@ class FeatureExtractorPatch:
                     self.grid_rgb[occupied_id] = (self.grid_rgb[occupied_id] * w + rgb_v * alpha) / (w + alpha)
                     self.weight[occupied_id] = w + alpha
                 processed_points += 1
+        t10 = time.time()
+        logger.info('process_frame: 特征融合耗时 %.4f 秒', t10 - t9)
 
         self.frame_count += 1
+        t_end = time.time()
+        logger.info('process_frame: 帧 %d 总耗时 %.4f 秒, 点数=%d, 特征数=%d',
+                    self.frame_count, t_end - t_start, processed_points, self.max_id)
         return {
             'processed_points': processed_points,
             'total_features': self.max_id,
@@ -447,10 +450,6 @@ class FeatureExtractorPatch:
         cv2.imwrite(output_path + '_height_map.png', (self.height_map / self.vh * 255).astype(np.uint8))
         cv2.imwrite(output_path + '_cv_map.png', cv2.cvtColor(self.cv_map, cv2.COLOR_RGB2BGR))
         logger.info('Saved 3D voxel feature map: %s | N=%d', output_path, self.max_id)
-
-# -----------------------------------------------------------------------------
-# CLI（Step 1 验证用）
-# -----------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     """解析命令行参数（仅保留对齐运行相关）。"""
@@ -523,7 +522,6 @@ def main() -> None:
     logger.info('VLMaps-like run over %d frames...', n)
     import time
     for i in range(n):
-        start = time.time()
         frm = reader.get_frame(i)
         # 读取 RGB（按照 metadata 路径）
         img_tensor = load_and_preprocess_images([frm['image_path']])
@@ -537,7 +535,6 @@ def main() -> None:
             camera_intrinsic=frm['intrinsics'],
             camera_pose=frm['cam_to_world'],
         )
-        logger.info('Frame %d/%d processed in %.2f seconds', i + 1, n, time.time() - start)
         if (i + 1) % 5 == 0 or i == n - 1:
             logger.info('Frame %d/%d: points=%d, total_features=%d', i + 1, n, stats['processed_points'], stats['total_features'])
 
