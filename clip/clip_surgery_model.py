@@ -89,7 +89,7 @@ class Attention(nn.Module):
             scale = self.scale * 8
         else:
             scale = self.scale
-        
+
         # self-attention, higher temperate for resnets performs better
         attn = (q @ k.transpose(-2, -1)) * scale
         attn = (attn).softmax(dim=-1)
@@ -316,9 +316,10 @@ class VisionTransformer(nn.Module):
 
         # reform the architecture during first inference
         if self.attn == None:
-            
+
             # apply architecture surgery on the last 6 blocks
-            for i in range(1, 7): # surgery 7, maskclip 2
+            num_layers = len(self.transformer.resblocks)
+            for i in range(1, num_layers//2+1): # surgery 7, maskclip 2
                 self.attn = Attention(self.embed_dim, self.embed_dim, self.num_heads, True)
                 self.attn.qkv.weight.data = self.transformer.resblocks[-i].attn.in_proj_weight.clone()
                 self.attn.qkv.bias.data = self.transformer.resblocks[-i].attn.in_proj_bias.clone()

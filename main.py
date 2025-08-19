@@ -151,10 +151,11 @@ class ClipSurgeryExtractor:
         这里将其移除并返回 (B, N, C)。若需要 2D 网格，可尝试 sqrt(N) 还原为 (H_p, W_p, C)。
     """
 
-    def __init__(self, device: Optional[str] = None) -> None:
+    def __init__(self, model_name='CS-ViT-B/16', device: Optional[str] = None) -> None:
         """初始化模型与预处理。
 
         Args:
+            model_name: 模型名称
             device: 设备标识，'cuda'/'cpu'/None(None 表示自动)
         """
         if device is None or device == 'auto':
@@ -162,7 +163,7 @@ class ClipSurgeryExtractor:
         else:
             self.device = device
 
-        self.model, self.preprocess = clip.load('CS-ViT-B/16', device=self.device)
+        self.model, self.preprocess = clip.load(model_name, device=self.device)
         self.model = self.model.eval()
         logger.info('CLIP_Surgery model loaded on %s', self.device)
 
@@ -454,7 +455,13 @@ class FeatureExtractorPatch:
 def parse_args() -> argparse.Namespace:
     """解析命令行参数（仅保留对齐运行相关）。"""
     parser = argparse.ArgumentParser(
-        description='VLMaps-aligned CLIP patch 3D feature mapping (vggt_feature_m2 style)',
+        description='VLMaps-aligned CLIP patch 3D feature mapping',
+    )
+    parser.add_argument(
+        '--model_name',
+        type=str,
+        default='CS-ViT-B/16',
+        help='Name of the CLIP model to use'
     )
     parser.add_argument(
         '--results',

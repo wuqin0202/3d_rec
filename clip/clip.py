@@ -30,6 +30,7 @@ __all__ = ["available_models", "load", "tokenize", "encode_text_with_prompt_ense
 _tokenizer = _Tokenizer()
 
 _MODELS = {
+    # 原始 CLIP
     "RN50": "https://openaipublic.azureedge.net/clip/models/afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762/RN50.pt",
     "RN101": "https://openaipublic.azureedge.net/clip/models/8fa8567bab74a42d41c5915025a8e4538c3bdbe8804a470a72f30b0d94fab599/RN101.pt",
     "RN50x4": "https://openaipublic.azureedge.net/clip/models/7e526bd135e493cef0776de27d5f42653e6b4c8bf9e0f653bb11773263205fdd/RN50x4.pt",
@@ -39,6 +40,8 @@ _MODELS = {
     "ViT-B/16": "https://openaipublic.azureedge.net/clip/models/5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f/ViT-B-16.pt",
     "ViT-L/14": "https://openaipublic.azureedge.net/clip/models/b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836/ViT-L-14.pt",
     "ViT-L/14@336px": "https://openaipublic.azureedge.net/clip/models/3035c92b350959924f9f00213499208652fc7ea050643e8b385c2dac08641f02/ViT-L-14-336px.pt",
+
+    # CLIP_Surgery
     "CS-RN50": "https://openaipublic.azureedge.net/clip/models/afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762/RN50.pt",
     "CS-RN101": "https://openaipublic.azureedge.net/clip/models/8fa8567bab74a42d41c5915025a8e4538c3bdbe8804a470a72f30b0d94fab599/RN101.pt",
     "CS-RN50x4": "https://openaipublic.azureedge.net/clip/models/7e526bd135e493cef0776de27d5f42653e6b4c8bf9e0f653bb11773263205fdd/RN50x4.pt",
@@ -48,6 +51,10 @@ _MODELS = {
     "CS-ViT-B/16": "https://openaipublic.azureedge.net/clip/models/5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f/ViT-B-16.pt",
     "CS-ViT-L/14": "https://openaipublic.azureedge.net/clip/models/b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836/ViT-L-14.pt",
     "CS-ViT-L/14@336px": "https://openaipublic.azureedge.net/clip/models/3035c92b350959924f9f00213499208652fc7ea050643e8b385c2dac08641f02/ViT-L-14-336px.pt",
+
+    # MetaCLIP_Surgery
+    "MetaCS-ViT-B/16": "b16_fullcc2.5b.pt",
+    "MetaCS-ViT-H/14": "metaclip2_h14_quickgelu_224px_worldwide.pt",
 }
 
 
@@ -102,6 +109,19 @@ def available_models() -> List[str]:
     return list(_MODELS.keys())
 
 
+def load_metaclip(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu", jit: bool = False, download_root: str = None):
+    """Load a MetaCLIP model
+
+    Parameters
+    """
+    model_path = os.path.join(download_root or os.path.expanduser("~/.cache/clip"), _MODELS[name])
+    state_dict = torch.load(model_path, map_location="cpu")['state_dict']
+    model = build_model(name, state_dict or model.state_dict()).to(device)
+    if str(device) == "cpu":
+        model.float()
+    return model, _transform(model.visual.input_resolution)
+
+
 def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu", jit: bool = False, download_root: str = None):
     """Load a CLIP model
 
@@ -127,24 +147,28 @@ def load(name: str, device: Union[str, torch.device] = "cuda" if torch.cuda.is_a
     preprocess : Callable[[PIL.Image], torch.Tensor]
         A torchvision transform that converts a PIL image into a tensor that the returned model can take as its input
     """
-    if name in _MODELS:
-        model_path = _download(_MODELS[name], download_root or os.path.expanduser("~/.cache/clip"))
-    elif os.path.isfile(name):
-        model_path = name
+    is_metaclip = 'Meta' in name
+    if is_metaclip:
+        return load_metaclip(name, device=device, jit=jit, download_root=download_root)
     else:
-        raise RuntimeError(f"Model {name} not found; available models = {available_models()}")
+        if name in _MODELS:
+            model_path = _download(_MODELS[name], download_root or os.path.expanduser("~/.cache/clip"))
+        elif os.path.isfile(name):
+            model_path = name
+        else:
+            raise RuntimeError(f"Model {name} not found; available models = {available_models()}")
 
-    with open(model_path, 'rb') as opened_file:
-        try:
-            # loading JIT archive
-            model = torch.jit.load(opened_file, map_location=device if jit else "cpu").eval()
-            state_dict = None
-        except RuntimeError:
-            # loading saved state dict
-            if jit:
-                warnings.warn(f"File {model_path} is not a JIT archive. Loading as a state dict instead")
-                jit = False
-            state_dict = torch.load(opened_file, map_location="cpu")
+        with open(model_path, 'rb') as opened_file:
+            try:
+                # loading JIT archive
+                model = torch.jit.load(opened_file, map_location=device if jit else "cpu").eval()
+                state_dict = None
+            except RuntimeError:
+                # loading saved state dict
+                if jit:
+                    warnings.warn(f"File {model_path} is not a JIT archive. Loading as a state dict instead")
+                    jit = False
+                state_dict = torch.load(opened_file, map_location="cpu")
 
     if not jit:
         model = build_model(name, state_dict or model.state_dict()).to(device)
@@ -248,7 +272,7 @@ def tokenize(texts: Union[str, List[str]], context_length: int = 77, truncate: b
     return result
 
 
-def encode_text_with_prompt_ensemble(model, texts, device, prompt_templates=None):
+def encode_text_with_prompt_ensemble(model, texts, device, prompt_templates=None, tokenize=tokenize):
 
     # using default prompt templates for ImageNet
     if prompt_templates == None:
@@ -280,7 +304,7 @@ def get_similarity_map(sm, shape):
     # interpolate
     sm = torch.nn.functional.interpolate(sm, shape, mode='bilinear')
     sm = sm.permute(0, 2, 3, 1)
-    
+
     return sm
 
 
@@ -301,7 +325,7 @@ def clip_feature_surgery(image_features, text_features, redundant_feats=None, t=
         feats *= w.reshape(1, 1, n_t, 1)
         redundant_feats = feats.mean(2, keepdim=True) # along cls dim
         feats = feats - redundant_feats
-        
+
         # sum the element-wise multiplied features as cosine similarity
         similarity = feats.sum(-1)
 

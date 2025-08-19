@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import logging
 from typing import Optional, Tuple
+import os
 
 import numpy as np
 
@@ -77,6 +78,21 @@ class ClipTextEncoder:
         self._preprocess = None
         self._model_name = model_name
 
+        if 'Meta' in model_name:
+            def get_tokenizer(tokenizer: str):
+                from transformers import AutoTokenizer
+                os.environ["TOKENIZERS_PARALLELISM"] = "false"
+                tokenizer = AutoTokenizer.from_pretrained(tokenizer, use_fast=True)
+
+                def tokenize_fn(txt_list):
+                    input_ids = tokenizer(txt_list, return_tensors='pt', padding='max_length', truncation=True, max_length=77)['input_ids']
+                    return input_ids
+
+                return tokenize_fn
+            self.tokenize = get_tokenizer("/data25/wuqin/.cache/huggingface/hub/models--facebook--xlm-v-base/snapshots/68c75dd7733d2640b3a98114e3e94196dc543fe1")
+        else:
+            self.tokenize = clip.tokenize  # 使用仓库提供的 tokenize 方法
+
     @property
     def model(self):
         if self._model is None:
@@ -96,7 +112,8 @@ class ClipTextEncoder:
             torch.Tensor: (C,) 归一化特征
         """
         # 优先使用仓库提供的 prompt ensemble 方法
-        text_feat = clip.encode_text_with_prompt_ensemble(self.model, [text], self.device)[0]
+        # text_feat = clip.encode_text_with_prompt_ensemble(self.model, [text], self.device)[0]
+        text_feat = clip.encode_text_with_prompt_ensemble(self.model, [text], self.device, tokenize=self.tokenize, prompt_templates=['{}'])[0]
         text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
         return text_feat
 
@@ -207,7 +224,7 @@ class VLMAPSViserApp:
         # 添加基础点云
         if self.points_xyz is not None and self.points_xyz.shape[0] > 0:
             # 默认基础点大小
-            base_pt_size = 0.05
+            base_pt_size = 0.02
             self._base_points_node = self.server.scene.add_point_cloud(
                 '/vlmaps/points',
                 points=self.points_xyz.astype(np.float32),
@@ -228,8 +245,8 @@ class VLMAPSViserApp:
         gui_text = self.server.gui.add_text('Query Text', initial_value='chair')
         gui_thresh = self.server.gui.add_slider('Similarity Threshold', min=0.0, max=1.0, step=0.01, initial_value=0.25)
         gui_topk = self.server.gui.add_slider('Top-K (0=off)', min=0, max=200000, step=100, initial_value=0)
-        gui_pt_size = self.server.gui.add_slider('Highlight Point Size', min=0.005, max=0.05, step=0.001, initial_value=0.005)
-        gui_base_pt_size = self.server.gui.add_slider('Base Point Size', min=0.005, max=0.05, step=0.001, initial_value=(self._base_points_node.point_size if self._base_points_node is not None else 0.005))
+        gui_pt_size = self.server.gui.add_slider('Highlight Point Size', min=0.005, max=0.05, step=0.001, initial_value=0.02)
+        gui_base_pt_size = self.server.gui.add_slider('Base Point Size', min=0.005, max=0.05, step=0.001, initial_value=(self._base_points_node.point_size if self._base_points_node is not None else 0.02))
         btn_run = self.server.gui.add_button('Run Query')
         btn_clear = self.server.gui.add_button('Clear Highlights')
         txt_status = self.server.gui.add_text('Status', initial_value='Ready', disabled=True)
@@ -360,6 +377,7 @@ class VLMAPSViserApp:
 def parse_args() -> argparse.Namespace:
     """解析命令行参数。"""
     p = argparse.ArgumentParser(description='VLMaps viser viewer with text highlight')
+    p.add_argument('--model_name', type=str, default='CS-ViT-B/16', help='CLIP model name to use')
     p.add_argument('--map', type=str, default='output/vlmaps_features_clip_patch.h5df', help='Path to H5DF map file')
     p.add_argument('--cell_size', type=float, default=0.05, help='Voxel cell size in meters')
     p.add_argument('--camera_height', type=float, default=3.0, help='Camera height in meters (for completeness)')

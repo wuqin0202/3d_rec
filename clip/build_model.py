@@ -1,6 +1,7 @@
 from torch import nn
 from .clip_model import CLIP
 from .clip_surgery_model import CLIPSurgery
+from .metaclip_surgery_model import MetaCLIPSurgery
 
 
 def convert_weights(model: nn.Module):
@@ -53,11 +54,18 @@ def build_model(name: str, state_dict: dict):
     transformer_layers = len(set(k.split(".")[2] for k in state_dict if k.startswith(f"transformer.resblocks")))
 
     if 'CS-' in name:
-        model = CLIPSurgery(
-            embed_dim,
-            image_resolution, vision_layers, vision_width, vision_patch_size,
-            context_length, vocab_size, transformer_width, transformer_heads, transformer_layers
-        )
+        if 'Meta' in name:
+            model = MetaCLIPSurgery(
+                embed_dim,
+                image_resolution, vision_layers, vision_width, vision_patch_size,
+                context_length, vocab_size, transformer_width, transformer_heads, transformer_layers
+            )
+        else:
+            model = CLIPSurgery(
+                embed_dim,
+                image_resolution, vision_layers, vision_width, vision_patch_size,
+                context_length, vocab_size, transformer_width, transformer_heads, transformer_layers
+            )
     else:
         model = CLIP(
             embed_dim,
